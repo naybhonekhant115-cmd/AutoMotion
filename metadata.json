@@ -1,0 +1,6 @@
+{
+  "name": "Diyy Motion Telegram App",
+  "description": "Secure activation interface and quota tracker for the Diyy Motion Alight Motion API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

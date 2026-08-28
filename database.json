@@ -1,0 +1,108 @@
+{
+  "transactions": [],
+  "users": {
+    "mock_user": {
+      "id": "mock_user",
+      "email": "user@example.com",
+      "name": "AutoMotion User",
+      "provider": "guest",
+      "purchases": 0,
+      "referrals": 0,
+      "rewardsToClaim": 0,
+      "activatableCount": 0,
+      "refCode": "AM-3EWXW",
+      "referralBatches": [
+        {
+          "code": "AM-3EWXW",
+          "createdAt": "2026-08-27T07:30:03.026Z",
+          "users": [],
+          "status": "active",
+          "rewardClaimed": false
+        }
+      ],
+      "orders": [],
+      "ledger": []
+    },
+    "103159094196861342064": {
+      "id": "103159094196861342064",
+      "email": "103159094196861342064@user.app",
+      "name": "Google User",
+      "provider": "google",
+      "purchases": 0,
+      "referrals": 0,
+      "rewardsToClaim": 0,
+      "activatableCount": 0,
+      "refCode": "AM-LKG19",
+      "referralBatches": [
+        {
+          "code": "AM-LKG19",
+          "createdAt": "2026-08-27T07:30:03.634Z",
+          "users": [],
+          "status": "active",
+          "rewardClaimed": false
+        }
+      ],
+      "orders": [],
+      "ledger": []
+    },
+    "6813310566": {
+      "id": "6813310566",
+      "name": "All in One Game Shop",
+      "activatableCount": 0,
+      "activatedCount": 1,
+      "referralCode": "MN8LFD",
+      "invitedBy": null,
+      "referralBatches": [],
+      "orders": [
+        {
+          "id": "ORD-584273",
+          "date": "2026-08-28T06:46:24.273Z",
+          "amount": 5000,
+          "activations": 1,
+          "status": "approved"
+        }
+      ]
+    },
+    "5723422493": {
+      "id": "5723422493",
+      "name": "delusional Levil",
+      "activatableCount": 0,
+      "activatedCount": 0,
+      "referralCode": "5V3YFB",
+      "invitedBy": null,
+      "referralBatches": [],
+      "orders": [],
+      "language": "my"
+    },
+    "6004083423": {
+      "id": "6004083423",
+      "name": "Htoo.",
+      "activatableCount": 0,
+      "activatedCount": 0,
+      "referralCode": "0T66ZF",
+      "invitedBy": null,
+      "referralBatches": [],
+      "orders": [],
+      "language": "my"
+    },
+    "7868737323": {
+      "id": "7868737323",
+      "name": "Haro",
+      "activatableCount": 0,
+      "activatedCount": 0,
+      "referralCode": "45K8FG",
+      "invitedBy": null,
+      "referralBatches": [],
+      "orders": []
+    }
+  },
+  "ledger": [],
+  "settings": {
+    "maintenanceMode": true,
+    "testers": [
+      "5723422493"
+    ],
+    "requiredChannel": "@levil_s_shop",
+    "subscriptionEndDate": "August 2, 2027 (12 Months)"
+  }
+}
