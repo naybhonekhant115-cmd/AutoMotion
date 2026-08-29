@@ -14,6 +14,12 @@ export interface ReferralBatch {
   rewardClaimed: boolean;
 }
 
+export interface DiscountToken {
+  code: string;
+  percent: number;
+  isUsed: boolean;
+}
+
 export interface UserProfile {
   id: string; // Telegram Chat ID
   name: string;
@@ -27,6 +33,7 @@ export interface UserProfile {
   refCode?: string; // Legacy
   isReseller?: boolean;
   resellerExpiry?: number; // timestamp in ms (30 days per sub)
+  discountTokens?: DiscountToken[];
 }
 
 export interface Order {
@@ -38,11 +45,12 @@ export interface Order {
   telegramMessageId?: number; // Store message ID for admin approval
   type?: 'activation' | 'activations' | 'reseller_sub' | 'reseller_activations';
   months?: number;
+  discountCode?: string;
 }
 
 export interface LedgerRecord {
   id: string;
-  type: 'activation' | 'referral_reward' | 'purchase';
+  type: 'activation' | 'referral_reward' | 'purchase' | 'bonus';
   amount: number;
   description: string;
   date: string;
@@ -52,6 +60,9 @@ export interface SystemSettings {
   maintenanceMode: boolean;
   testers: string[]; // up to 3 Telegram user IDs
   requiredChannel?: string; // e.g. "@AutoMotionChannel" or "-100123456789"
+  announcementChannel?: string;
+  announcementGroup?: string; // Group for purchase/activation announcements (e.g. "@MyGroup" or "-100123456789")
+  tutorialVideoLink?: string; // e.g. "https://t.me/MyChannel/123"
   backupChannel?: string; // e.g. "@AutoMotionBackups" or "-100123456789"
   subscriptionEndDate?: string; // e.g. "August 2, 2027 (12 Months)"
   normalPrice1?: number; // default 5,000 Ks
@@ -72,6 +83,7 @@ const loadDB = (): {
   users: Record<string, UserProfile>; 
   ledger: LedgerRecord[];
   settings: SystemSettings;
+  giveaways: Record<string, { code: string; maxUses: number; reward: number; redeemedBy: string[]; type?: string; discountPercent?: number }>;
 } => {
   if (fs.existsSync(DB_FILE)) {
     try {
@@ -80,10 +92,14 @@ const loadDB = (): {
         transactions: new Set<string>(data.transactions || []),
         users: data.users || {},
         ledger: data.ledger || [],
+        giveaways: data.giveaways || {},
         settings: {
           maintenanceMode: !!data.settings?.maintenanceMode,
           testers: Array.isArray(data.settings?.testers) ? data.settings.testers.slice(0, 3) : [],
           requiredChannel: data.settings?.requiredChannel || process.env.TELEGRAM_REQUIRED_CHANNEL || '',
+          announcementChannel: data.settings?.announcementChannel || '',
+          announcementGroup: data.settings?.announcementGroup || process.env.TELEGRAM_ANNOUNCEMENT_GROUP || process.env.TELEGRAM_NOTIFICATION_GROUP || '',
+          tutorialVideoLink: data.settings?.tutorialVideoLink || '',
           backupChannel: data.settings?.backupChannel || process.env.TELEGRAM_BACKUP_CHANNEL || '',
           subscriptionEndDate: data.settings?.subscriptionEndDate || 'August 2, 2027 (12 Months)',
           normalPrice1: typeof data.settings?.normalPrice1 === 'number' ? data.settings.normalPrice1 : 5000,
@@ -99,10 +115,14 @@ const loadDB = (): {
     transactions: new Set<string>(),
     users: {},
     ledger: [],
-    settings: {
+    giveaways: {},
+        settings: {
       maintenanceMode: false,
       testers: [],
       requiredChannel: process.env.TELEGRAM_REQUIRED_CHANNEL || '',
+      announcementChannel: '',
+      announcementGroup: process.env.TELEGRAM_ANNOUNCEMENT_GROUP || process.env.TELEGRAM_NOTIFICATION_GROUP || '',
+      tutorialVideoLink: '',
       backupChannel: process.env.TELEGRAM_BACKUP_CHANNEL || '',
       subscriptionEndDate: 'August 2, 2027 (12 Months)',
       normalPrice1: 5000,
@@ -120,6 +140,7 @@ const saveDB = () => {
       transactions: Array.from(db.transactions),
       users: db.users,
       ledger: db.ledger,
+      giveaways: db.giveaways,
       settings: db.settings
     }, null, 2));
   } catch (e) {
@@ -190,6 +211,9 @@ const applyImportedDatabase = (importedData: any): { success: boolean; usersCoun
         maintenanceMode: !!importedData.settings.maintenanceMode,
         testers: Array.isArray(importedData.settings.testers) ? importedData.settings.testers.slice(0, 3) : db.settings.testers,
         requiredChannel: importedData.settings.requiredChannel !== undefined ? importedData.settings.requiredChannel : db.settings.requiredChannel,
+        announcementChannel: importedData.settings.announcementChannel !== undefined ? importedData.settings.announcementChannel : db.settings.announcementChannel,
+        announcementGroup: importedData.settings.announcementGroup !== undefined ? importedData.settings.announcementGroup : db.settings.announcementGroup,
+        tutorialVideoLink: importedData.settings.tutorialVideoLink !== undefined ? importedData.settings.tutorialVideoLink : db.settings.tutorialVideoLink,
         backupChannel: importedData.settings.backupChannel !== undefined ? importedData.settings.backupChannel : db.settings.backupChannel,
         subscriptionEndDate: importedData.settings.subscriptionEndDate || db.settings.subscriptionEndDate,
         normalPrice1: typeof importedData.settings.normalPrice1 === 'number' ? importedData.settings.normalPrice1 : db.settings.normalPrice1,
@@ -221,11 +245,20 @@ interface BotState {
     | 'AWAITING_PAYMENT_SLIP' 
     | 'AWAITING_TRANSACTION_ID' 
     | 'AWAITING_TESTER_ID' 
-    | 'AWAITING_CHANNEL_INPUT' 
+    | 'AWAITING_CHANNEL_INPUT'
+    | 'AWAITING_ANNOUNCEMENT_CHANNEL_INPUT'
+    | 'AWAITING_ANNOUNCEMENT_GROUP_INPUT' 
+    | 'AWAITING_TUTORIAL_VIDEO_LINK'
     | 'AWAITING_BACKUP_CHANNEL_INPUT'
     | 'AWAITING_SUB_DATE_INPUT'
     | 'AWAITING_NORMAL_PRICE_INPUT'
-    | 'AWAITING_DB_IMPORT_FILE';
+    | 'AWAITING_DB_IMPORT_FILE'
+    | 'AWAITING_REDEEM_CODE'
+    | 'AWAITING_GIVEAWAY_CODE_SETUP'
+    | 'AWAITING_GIVEAWAY_MAX_USES_SETUP'
+    | 'AWAITING_GIVEAWAY_REWARD_SETUP'
+    | 'AWAITING_DISCOUNT_SELECTION'
+    | 'AWAITING_DISCOUNT_APPLIED';
   data?: any;
 }
 const userStates: Record<number, BotState> = {};
@@ -377,7 +410,7 @@ export function startBot() {
   const getResellerPrice = (amount: number): number => {
     if (amount === 1) return 1500;
     if (amount === 5) return 5000; // 1,000 each (Total 5,000 Ks)
-    if (amount === 10) return 5000; // 500 each (Total 5,000 Ks)
+    if (amount === 20) return 10000; // 500 each (Total 10,000 Ks)
     return amount * 1500;
   };
 
@@ -388,52 +421,61 @@ export function startBot() {
     return false;
   };
 
-  const checkUserJoinedChannel = async (userId: number | string): Promise<boolean> => {
-    const channel = db.settings?.requiredChannel?.trim();
-    if (!channel) return true; // No channel requirement configured
+  const getUnjoinedChannels = async (userId: number | string): Promise<string[]> => {
+    if (isAuthorizedUser(userId)) return [];
 
-    // Admins and testers bypass channel check
-    if (isAuthorizedUser(userId)) return true;
+    const channelsToCheck: string[] = [];
+    if (db.settings?.requiredChannel?.trim()) channelsToCheck.push(db.settings.requiredChannel.trim());
+    if (db.settings?.announcementChannel?.trim()) channelsToCheck.push(db.settings.announcementChannel.trim());
 
-    try {
-      const member = await bot.getChatMember(channel, typeof userId === 'string' ? parseInt(userId) : userId);
-      // Valid joined statuses: 'creator', 'administrator', 'member', 'restricted' (if still present in chat)
-      if (['creator', 'administrator', 'member', 'restricted'].includes(member.status)) {
-        return true;
+    if (channelsToCheck.length === 0) return [];
+
+    const parsedUserId = typeof userId === 'string' ? parseInt(userId) : userId;
+    const checks = await Promise.all(channelsToCheck.map(async (channel) => {
+      try {
+        const member = await bot.getChatMember(channel, parsedUserId);
+        if (['creator', 'administrator', 'member', 'restricted'].includes(member.status)) {
+          return null;
+        }
+        return channel;
+      } catch (e: any) {
+        console.error(`Error checking chat member for user ${userId} in ${channel}:`, e?.message || e);
+        // If an error occurs (like "user not found" or "chat not found"),
+        // assume the user hasn't joined to enforce the requirement.
+        return channel;
       }
-      return false;
-    } catch (e: any) {
-      console.error(`Error checking chat member for user ${userId} in ${channel}:`, e?.message || e);
-      // If bot is not admin or channel is invalid, don't break the user experience
-      return true;
-    }
+    }));
+
+    return checks.filter((c): c is string => c !== null);
   };
 
-  const sendJoinChannelPrompt = (chatId: number, lang: 'en' | 'my' = 'my', retryParam?: string) => {
-    const channel = db.settings?.requiredChannel?.trim();
-    if (!channel) {
+  const sendJoinChannelPrompt = (chatId: number, unjoinedChannels: string[], lang: 'en' | 'my' = 'my', retryParam?: string) => {
+    if (unjoinedChannels.length === 0) {
       sendMainMenu(chatId, lang);
       return;
     }
 
-    const channelUsername = channel.startsWith('@') ? channel.substring(1) : channel;
-    const channelUrl = channel.startsWith('@') 
-      ? `https://t.me/${channelUsername}`
-      : channel.startsWith('http') 
-        ? channel 
-        : `https://t.me/${channelUsername}`;
-
     const text = lang === 'my'
-      ? `📢 **Bot ကို အသုံးမပြုမီ ကျွန်ုပ်တို့၏ Telegram Channel သို့ Join ပေးပါခင်ဗျာ။**\n\nChannel သို့ Join ပြီးပါက အောက်ပါ **"✅ Joined ပြီးပါပြီ (Check)"** ခလုတ်ကို နှိပ်၍ ဆက်လက်အသုံးပြုနိုင်ပါသည်။`
-      : `📢 **Please join our official Telegram Channel to use this bot.**\n\nAfter joining the channel, click the **"✅ I Have Joined (Check)"** button below to continue.`;
+      ? `📢 **Bot ကို အသုံးမပြုမီ အောက်ပါ Telegram Channel(s) များသို့ Join ပေးပါခင်ဗျာ။**\n\nChannel အားလုံးသို့ Join ပြီးပါက **"✅ Joined ပြီးပါပြီ (Check)"** ခလုတ်ကို နှိပ်၍ ဆက်လက်အသုံးပြုနိုင်ပါသည်။`
+      : `📢 **Please join our official Telegram Channel(s) to use this bot.**\n\nAfter joining all required channels, click the **"✅ I Have Joined (Check)"** button below to continue.`;
 
-    const joinBtnText = lang === 'my' ? '📢 Join Channel' : '📢 Join Channel';
     const checkBtnText = lang === 'my' ? '✅ Joined ပြီးပါပြီ (Check)' : '✅ I Have Joined (Check)';
+    
+    const inline_keyboard = [];
+    
+    unjoinedChannels.forEach(channel => {
+      const channelUsername = channel.startsWith('@') ? channel.substring(1) : channel;
+      const channelUrl = channel.startsWith('@') 
+        ? `https://t.me/${channelUsername}`
+        : channel.startsWith('http') 
+          ? channel 
+          : `https://t.me/${channelUsername}`;
+      
+      const joinBtnText = `📢 Join ${channel}`;
+      inline_keyboard.push([{ text: joinBtnText, url: channelUrl }]);
+    });
 
-    const inline_keyboard = [
-      [{ text: joinBtnText, url: channelUrl }],
-      [{ text: checkBtnText, callback_data: retryParam ? `check_join_${retryParam}` : 'check_join' }]
-    ];
+    inline_keyboard.push([{ text: checkBtnText, callback_data: retryParam ? `check_join_${retryParam}` : 'check_join' }]);
 
     bot.sendMessage(chatId, text, {
       parse_mode: 'Markdown',
@@ -453,6 +495,14 @@ export function startBot() {
     bot.sendMessage(chatId, notice, { parse_mode: 'Markdown' });
   };
 
+  const sendGroupAnnouncement = (announcementText: string) => {
+    const targetGroup = db.settings?.announcementGroup || process.env.TELEGRAM_ANNOUNCEMENT_GROUP || process.env.TELEGRAM_NOTIFICATION_GROUP;
+    if (!targetGroup || !targetGroup.trim()) return;
+    bot.sendMessage(targetGroup.trim(), announcementText, { parse_mode: 'Markdown' }).catch((err: any) => {
+      console.error(`Failed to send announcement to group ${targetGroup}:`, err?.message || err);
+    });
+  };
+
   const sendResellerPanel = (chatId: number, user: UserProfile, msgIdToEdit?: number) => {
     const lang = user.language || 'my';
     const isReseller = isUserReseller(user);
@@ -469,7 +519,7 @@ export function startBot() {
           `🔥 **Reseller အထူးလက်ကားစျေးနှုန်းများ:**\n` +
           `• 1 Activation = **1,500 Ks**\n` +
           `• 5 Bulk Activations = **5,000 Ks** (1 ခုလျှင် 1,000 Ks)\n` +
-          `• 10 Bulk Activations = **5,000 Ks** (1 ခုလျှင် 500 Ks)\n\n` +
+          `• 20 Bulk Activations = **10,000 Ks** (1 ခုလျှင် 500 Ks)\n\n` +
           `✨ Subscription စတင်ဝယ်ယူရန် အောက်ပါ **"💳 Reseller Sub ဝယ်ယူရန်"** ခလုတ်ကို နှိပ်ပါခင်ဗျာ။`;
       } else {
         text = `💼 **Reseller Panel (Wholesale Portal)**\n\n` +
@@ -478,7 +528,7 @@ export function startBot() {
           `🔥 **Exclusive Reseller Activation Rates:**\n` +
           `• 1 Activation = **1,500 Ks**\n` +
           `• 5 Bulk Activations = **5,000 Ks** (1,000 Ks each)\n` +
-          `• 10 Bulk Activations = **5,000 Ks** (500 Ks each)\n\n` +
+          `• 20 Bulk Activations = **10,000 Ks** (500 Ks each)\n\n` +
           `✨ Click **"💳 Buy Reseller Sub"** below to activate your reseller account.`;
       }
 
@@ -500,7 +550,7 @@ export function startBot() {
           `🔥 **သင့် Reseller လက်ကားစျေးနှုန်းများ:**\n` +
           `• 1 Activation = **1,500 Ks**\n` +
           `• 5 Bulk Activations = **5,000 Ks** (1,000 Ks each)\n` +
-          `• 10 Bulk Activations = **5,000 Ks** (500 Ks each)\n\n` +
+          `• 20 Bulk Activations = **10,000 Ks** (1 ခုလျှင် 500 Ks)\n\n` +
           `အောက်ပါခလုတ်များမှ ဝယ်ယူလိုသော Activation အရေအတွက်ကို ရွေးချယ်ပါ:`;
       } else {
         text = `💼 **Reseller Panel (Active 🟢)**\n\n` +
@@ -509,7 +559,7 @@ export function startBot() {
           `🔥 **Your Reseller Wholesale Rates:**\n` +
           `• 1 Activation = **1,500 Ks**\n` +
           `• 5 Bulk Activations = **5,000 Ks** (1,000 Ks each)\n` +
-          `• 10 Bulk Activations = **5,000 Ks** (500 Ks each)\n\n` +
+          `• 20 Bulk Activations = **10,000 Ks** (500 Ks each)\n\n` +
           `Select the bulk activation package you want to purchase below:`;
       }
 
@@ -518,7 +568,7 @@ export function startBot() {
         { text: '🛒 5 Acts (5,000 Ks)', callback_data: 'buy_reseller_act_5' }
       ]);
       inline_keyboard.push([
-        { text: '🛒 10 Acts (5,000 Ks)', callback_data: 'buy_reseller_act_10' },
+        { text: '🛒 20 Acts (10,000 Ks)', callback_data: 'buy_reseller_act_20' },
         { text: lang === 'my' ? '🔄 သက်တမ်းတိုးရန် (10,000 Ks)' : '🔄 Renew Sub (10,000 Ks)', callback_data: 'buy_reseller_sub' }
       ]);
     }
@@ -561,6 +611,8 @@ export function startBot() {
     const isMaint = !!db.settings?.maintenanceMode;
     const maintStatus = isMaint ? "🔴 **ON** (Maintenance Active)" : "🟢 **OFF** (Public Normal)";
     const reqChannel = db.settings?.requiredChannel ? `\`${db.settings.requiredChannel}\`` : "_(None / Disabled)_";
+    const annChannel = db.settings?.announcementChannel ? `\`${db.settings.announcementChannel}\`` : "_(None / Disabled)_";
+    const annGroup = db.settings?.announcementGroup ? `\`${db.settings.announcementGroup}\`` : "_(None / Disabled)_";
     const bkpChannel = db.settings?.backupChannel ? `\`${db.settings.backupChannel}\`` : "_(None / Disabled)_";
     const subEndDate = db.settings?.subscriptionEndDate || "August 2, 2027 (12 Months)";
     const p1 = typeof db.settings?.normalPrice1 === 'number' ? db.settings.normalPrice1 : 5000;
@@ -590,6 +642,9 @@ export function startBot() {
       `📅 **Sub End Date:** \`${subEndDate}\`\n` +
       `🛠 **Maintenance Mode:** ${maintStatus}\n` +
       `📢 **Required Channel:** ${reqChannel}\n` +
+      `📢 **Announcement Channel:** ${annChannel}\n` +
+      `👥 **Announcement Group:** ${annGroup}\n` +
+      `🎥 **Tutorial Video:** ${db.settings?.tutorialVideoLink ? '[Link Set]' : '_(None)_'}\n` +
       `📦 **Backup Channel:** ${bkpChannel}\n` +
       `⏰ **Auto-Backup Schedule (Myanmar Time):**\n` +
       `• Day Time (6AM - 12AM): Every 2 Hours (6, 8, 10, 12, 14, 16, 18, 20, 22)\n` +
@@ -603,6 +658,9 @@ export function startBot() {
       `📅 *Set Sub Date:* \`/setsubdate <Date (Duration)>\`\n` +
       `🛠 *Maintenance:* \`/maintenance on\` or \`/maintenance off\`\n` +
       `📢 *Set Channel:* \`/setchannel @ChannelName\` or \`/setchannel off\`\n` +
+      `📢 *Set Announce Channel:* \`/setannchannel @ChannelName\` or \`/setannchannel off\`\n` +
+      `👥 *Set Announce Group:* \`/setgroup <@group_or_id>\` or \`/setgroup off\`\n` +
+      `🎥 *Set Tutorial:* \`/settutorial <link>\` or \`/settutorial off\`\n` +
       `🧪 *Tester Commands:* \`/addtester <id>\` or \`/removetester <id>\``;
 
     const inline_keyboard: any[][] = [
@@ -638,11 +696,52 @@ export function startBot() {
       ],
       [
         {
+          text: db.settings?.announcementChannel ? `📢 Announce Ch (${db.settings.announcementChannel})` : '📢 Set Announcement Channel',
+          callback_data: 'admin_prompt_set_announcement_channel'
+        },
+        {
+          text: db.settings?.announcementGroup ? `👥 Group (${db.settings.announcementGroup})` : '👥 Set Announce Group',
+          callback_data: 'admin_prompt_set_announcement_group'
+        }
+      ],
+      [
+        {
+          text: db.settings?.tutorialVideoLink ? '🎥 Edit Tutorial Video' : '🎥 Set Tutorial Video',
+          callback_data: 'admin_prompt_set_tutorial_video'
+        }
+      ],
+      [
+        {
           text: '📥 Import Database',
           callback_data: 'admin_import_db_menu'
+        },
+        {
+          text: '🎁 Giveaways',
+          callback_data: 'admin_giveaway_menu'
         }
       ]
     ];
+
+    if (db.settings?.tutorialVideoLink) {
+      inline_keyboard[4].push({
+        text: '❌ Del Tutorial',
+        callback_data: 'admin_remove_tutorial_video'
+      });
+    }
+
+    if (db.settings?.announcementGroup) {
+      inline_keyboard[3].push({
+        text: '❌ Del Group',
+        callback_data: 'admin_remove_announcement_group'
+      });
+    }
+
+    if (db.settings?.announcementChannel) {
+      inline_keyboard[3].push({
+        text: '❌ Del Announce Ch',
+        callback_data: 'admin_remove_announcement_channel'
+      });
+    }
 
     if (db.settings?.backupChannel) {
       inline_keyboard[2].push({
@@ -857,12 +956,14 @@ export function startBot() {
       [{ text: '🛒 Activation ဝယ်ယူရန်' }, { text: '🚀 AM အသက်သွင်းရန်' }],
       [{ text: '💼 Reseller Panel' }, { text: '🎁 Referral အစီအစဥ်' }],
       [{ text: '👤 မိမိ အချက်အလက်' }, { text: '📚 အသုံးပြုနည်း' }],
-      [{ text: '📞 Admin နှင့်ဆက်သွယ်ရန်' }, { text: '🌐 ဘာသာစကားပြောင်းရန်' }]
+      [{ text: '📞 Admin နှင့်ဆက်သွယ်ရန်' }, { text: '🌐 ဘာသာစကားပြောင်းရန်' }],
+      [{ text: '🔑 လက်ဆောင် Code ရယူရန်' }]
     ] : [
       [{ text: '🛒 Buy Activations' }, { text: '🚀 Activate AM Account' }],
       [{ text: '💼 Reseller Panel' }, { text: '🎁 Referral Program' }],
       [{ text: '👤 My Profile' }, { text: '📚 Tutorial' }],
-      [{ text: '📞 Contact Admin' }, { text: '🌐 Change Language' }]
+      [{ text: '📞 Contact Admin' }, { text: '🌐 Change Language' }],
+      [{ text: '🔑 Redeem Code' }]
     ];
 
     if (chatId.toString() === adminChatId) {
@@ -903,9 +1004,9 @@ export function startBot() {
     }
 
     // Real Telegram API check for channel membership
-    const hasJoined = await checkUserJoinedChannel(chatId);
-    if (!hasJoined) {
-      sendJoinChannelPrompt(chatId, user.language, param);
+    const unjoined = await getUnjoinedChannels(chatId);
+    if (unjoined.length > 0) {
+      sendJoinChannelPrompt(chatId, unjoined, user.language, param);
       return;
     }
 
@@ -931,10 +1032,10 @@ export function startBot() {
     }
 
     // Check Channel Membership for non-admin/testers before letting them use buttons or commands
-    if (db.settings?.requiredChannel && !isAuthorizedUser(chatId)) {
-      const hasJoined = await checkUserJoinedChannel(chatId);
-      if (!hasJoined) {
-        sendJoinChannelPrompt(chatId, user.language || 'my');
+    if (!isAuthorizedUser(chatId)) {
+      const unjoined = await getUnjoinedChannels(chatId);
+      if (unjoined.length > 0) {
+        sendJoinChannelPrompt(chatId, unjoined, user.language || 'my');
         return;
       }
     }
@@ -976,6 +1077,100 @@ export function startBot() {
         }
       });
 
+      sendAdminDashboard(chatId);
+      return;
+    }
+
+    // --- Admin: Awaiting Announcement Channel Input ---
+    if (chatId.toString() === adminChatId && state.step === 'AWAITING_ANNOUNCEMENT_CHANNEL_INPUT') {
+      if (text === 'Order ပယ်ဖျက်ရန်' || text === '/cancel' || text.toLowerCase() === 'cancel') {
+        userStates[chatId] = { step: 'IDLE' };
+        bot.sendMessage(chatId, "❌ Set announcement channel cancelled.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+
+      let channelInput = text.trim();
+      if (channelInput.toLowerCase() === 'off' || channelInput.toLowerCase() === 'remove' || channelInput.toLowerCase() === 'disable') {
+        db.settings.announcementChannel = '';
+        saveDB();
+        userStates[chatId] = { step: 'IDLE' };
+        bot.sendMessage(chatId, "✅ Announcement channel requirement has been **disabled**.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+
+      if (!channelInput.startsWith('@') && !channelInput.startsWith('-100') && !channelInput.startsWith('https://t.me/')) {
+        channelInput = `@${channelInput}`;
+      }
+
+      db.settings.announcementChannel = channelInput;
+      saveDB();
+      userStates[chatId] = { step: 'IDLE' };
+      bot.sendMessage(chatId, `✅ **Announcement Channel Set!**\n\nChannel: \`${channelInput}\`\n\n⚠️ **Important:** Make sure to add this bot as an **Administrator** in your Telegram channel with 'Invite Users' or standard admin permissions so Telegram allows the bot to verify memberships via \`getChatMember\`.`, { parse_mode: 'Markdown' });
+      sendAdminDashboard(chatId);
+      return;
+    }
+
+    // --- Admin: Awaiting Announcement Group Input ---
+    if (chatId.toString() === adminChatId && state.step === 'AWAITING_ANNOUNCEMENT_GROUP_INPUT') {
+      if (text === 'Order ပယ်ဖျက်ရန်' || text === '/cancel' || text.toLowerCase() === 'cancel') {
+        userStates[chatId] = { step: 'IDLE' };
+        bot.sendMessage(chatId, "❌ Set announcement group cancelled.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+
+      let groupInput = text.trim();
+      if (groupInput.toLowerCase() === 'off' || groupInput.toLowerCase() === 'remove' || groupInput.toLowerCase() === 'disable') {
+        db.settings.announcementGroup = '';
+        saveDB();
+        userStates[chatId] = { step: 'IDLE' };
+        bot.sendMessage(chatId, "✅ Announcement group notifications have been **disabled**.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+
+      if (!groupInput.startsWith('@') && !groupInput.startsWith('-100') && !groupInput.startsWith('https://t.me/')) {
+        groupInput = `@${groupInput}`;
+      }
+
+      db.settings.announcementGroup = groupInput;
+      saveDB();
+      userStates[chatId] = { step: 'IDLE' };
+      bot.sendMessage(chatId, `✅ **Announcement Group Set!**\n\nGroup: \`${groupInput}\`\n\n⚠️ **Important:** Make sure to add this bot into your group with message sending permissions. Purchases and AM activation alerts will now be sent here automatically!`, { parse_mode: 'Markdown' });
+      sendAdminDashboard(chatId);
+      return;
+    }
+
+    // --- Admin: Awaiting Tutorial Video Link Input ---
+    if (chatId.toString() === adminChatId && state.step === 'AWAITING_TUTORIAL_VIDEO_LINK') {
+      if (text === 'Order ပယ်ဖျက်ရန်' || text === '/cancel' || text.toLowerCase() === 'cancel') {
+        userStates[chatId] = { step: 'IDLE' };
+        bot.sendMessage(chatId, "❌ Set tutorial video cancelled.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+
+      let linkInput = text.trim();
+      if (linkInput.toLowerCase() === 'off' || linkInput.toLowerCase() === 'remove' || linkInput.toLowerCase() === 'disable') {
+        db.settings.tutorialVideoLink = '';
+        saveDB();
+        userStates[chatId] = { step: 'IDLE' };
+        bot.sendMessage(chatId, "✅ Tutorial video forwarding has been **disabled**.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+
+      if (!linkInput.startsWith('https://t.me/')) {
+         bot.sendMessage(chatId, "❌ Invalid link format. Please provide a valid Telegram message link starting with `https://t.me/`.", { parse_mode: 'Markdown' });
+         return;
+      }
+
+      db.settings.tutorialVideoLink = linkInput;
+      saveDB();
+      userStates[chatId] = { step: 'IDLE' };
+      bot.sendMessage(chatId, `✅ **Tutorial Video Set!**\n\nLink: \`${linkInput}\`\n\n⚠️ **Important:** Make sure the bot is an admin in the channel where this message is from, otherwise it won't be able to forward the video!`, { parse_mode: 'Markdown' });
       sendAdminDashboard(chatId);
       return;
     }
@@ -1072,6 +1267,109 @@ export function startBot() {
     }
 
     // --- Admin: Awaiting Tester ID ---
+    
+    if (chatId.toString() === adminChatId && state.step === 'AWAITING_GIVEAWAY_CODE_SETUP' && text) {
+      const code = text.trim() === 'random' ? Math.random().toString(36).substring(2, 10).toUpperCase() : text.trim().toUpperCase();
+      userStates[chatId] = { 
+        step: 'AWAITING_GIVEAWAY_MAX_USES_SETUP', 
+        data: { ...state.data, code } 
+      };
+      
+      let msg = '';
+      if (state.data.type === 'key') {
+        msg = `🔢 **Step 2: Max Uses**\n\nCode: ` + code + `\n\nHow many times can this key be redeemed? (Enter a number)`;
+      } else if (state.data.type === 'random') {
+        msg = `🔢 **Step 2: Number of Random Users**\n\nCode: ` + code + `\n\nHow many random users should receive this giveaway? (Enter a number)`;
+      } else if (state.data.type === 'discount') {
+        msg = `🔢 **Step 2: Max Uses**\n\nCode: ` + code + `\n\nHow many times can this discount key be redeemed? (Enter a number)`;
+      }
+        
+      bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (chatId.toString() === adminChatId && state.step === 'AWAITING_GIVEAWAY_MAX_USES_SETUP' && text) {
+      const limit = parseInt(text.trim());
+      if (isNaN(limit) || limit <= 0) {
+        bot.sendMessage(chatId, '❌ Please enter a valid positive number.');
+        return;
+      }
+      userStates[chatId] = { 
+        step: 'AWAITING_GIVEAWAY_REWARD_SETUP', 
+        data: { ...state.data, limit } 
+      };
+      
+      if (state.data.type === 'discount') {
+        bot.sendMessage(chatId, `🎁 **Step 3: Discount Percentage**\n\nWhat percentage discount should this give? (e.g., 20 for 20%)`, { parse_mode: 'Markdown' });
+      } else {
+        bot.sendMessage(chatId, `🎁 **Step 3: Reward Amount**\n\nHow many activations should each user get? (Enter a number)`, { parse_mode: 'Markdown' });
+      }
+      return;
+    }
+
+    if (chatId.toString() === adminChatId && state.step === 'AWAITING_GIVEAWAY_REWARD_SETUP' && text) {
+      const reward = parseInt(text.trim());
+      if (isNaN(reward) || reward <= 0) {
+        bot.sendMessage(chatId, '❌ Please enter a valid positive number.');
+        return;
+      }
+      
+      const gType = state.data.type;
+      const code = state.data.code;
+      const limit = state.data.limit;
+      
+      if (!db.giveaways) db.giveaways = {};
+      
+      if (gType === 'discount') {
+        db.giveaways[code] = {
+          code: code,
+          maxUses: limit,
+          reward: 0,
+          redeemedBy: [],
+          type: 'discount',
+          discountPercent: reward
+        };
+        saveDB();
+        bot.sendMessage(chatId, `✅ **Discount Key Created!**\n\nCode: \`${code}\`\nMax Uses: ${limit}\nDiscount: ${reward}%`, { parse_mode: 'Markdown' });
+        delete userStates[chatId];
+        return;
+      }
+
+      db.giveaways[code] = {
+        code: code,
+        maxUses: limit,
+        reward: reward,
+        redeemedBy: [],
+        type: gType
+      };
+      saveDB();
+      
+      if (gType === 'random') {
+        bot.sendMessage(chatId, `⏳ Giveaway created. Randomly selecting ${limit} users...`);
+        const allUsers = Object.values(db.users);
+        // Shuffle users
+        const shuffled = allUsers.sort(() => 0.5 - Math.random());
+        const selected = shuffled.slice(0, Math.min(limit, allUsers.length));
+        
+        let sent = 0;
+        for (const u of selected) {
+          const uLang = u.language || 'my';
+          const msg = uLang === 'my'
+            ? `🎉 **ဂုဏ်ယူပါတယ်!**\n\nသင်သည် Random Giveaway တွင် ရွေးချယ်ခံရပါသည်။\n\n🎁 လက်ဆောင် Code: ` + code + `\n⚡ ရရှိမည့် အသက်သွင်းခွင့်: ${reward} ခု\n\nMain Menu မှ **🔑 Redeem Code** ကိုနှိပ်၍ အသက်သွင်းနိုင်ပါသည်။`
+            : `🎉 **Congratulations!**\n\nYou have been randomly selected for a giveaway!\n\n🎁 Redeem Code: ` + code + `\n⚡ Reward: ${reward} Activations\n\nClick **🔑 Redeem Code** in the main menu to claim it!`;
+          
+          bot.sendMessage(u.id, msg, { parse_mode: 'Markdown' }).then(() => sent++).catch(() => {});
+        }
+        
+        bot.sendMessage(chatId, `✅ **Random Giveaway Sent!**\n\nCode: ` + code + `\nMax Uses: ${limit}\nReward: ${reward} Acts\nSuccessfully sent to ${selected.length} users.`, { parse_mode: 'Markdown' });
+      } else {
+        bot.sendMessage(chatId, `✅ **Redeem Key Created!**\n\nCode: ` + code + `\nMax Uses: ${limit}\nReward: ${reward} Acts\n\nYou can now share this code!`, { parse_mode: 'Markdown' });
+      }
+      
+      delete userStates[chatId];
+      return;
+    }
+
     if (chatId.toString() === adminChatId && state.step === 'AWAITING_TESTER_ID') {
       if (text === 'Order ပယ်ဖျက်ရန်' || text === '/cancel' || text.toLowerCase() === 'cancel') {
         userStates[chatId] = { step: 'IDLE' };
@@ -1208,6 +1506,81 @@ export function startBot() {
       db.settings.requiredChannel = formatted;
       saveDB();
       bot.sendMessage(chatId, `✅ Required channel set to \`${formatted}\`\n\nMake sure the bot is an Admin in that channel.`, { parse_mode: 'Markdown' });
+      sendAdminDashboard(chatId);
+      return;
+    }
+
+    // Set Announcement Channel Command: /setannchannel @Channel or /setannchannel off
+    if ((text.startsWith('/setannchannel') || text.startsWith('/setannouncementchannel') || text.startsWith('/annchannel')) && chatId.toString() === adminChatId) {
+      const channelParam = text.replace(/\/setannchannel|\/setannouncementchannel|\/annchannel/, '').trim();
+      if (!channelParam) {
+        bot.sendMessage(chatId, "❌ Usage: `/setannchannel @YourAnnouncementChannel` or `/setannchannel off`", { parse_mode: 'Markdown' });
+        return;
+      }
+      if (channelParam.toLowerCase() === 'off' || channelParam.toLowerCase() === 'disable') {
+        db.settings.announcementChannel = '';
+        saveDB();
+        bot.sendMessage(chatId, "✅ Announcement channel requirement has been disabled.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+      let formatted = channelParam;
+      if (!formatted.startsWith('@') && !formatted.startsWith('-100') && !formatted.startsWith('https://t.me/')) {
+        formatted = `@${formatted}`;
+      }
+      db.settings.announcementChannel = formatted;
+      saveDB();
+      bot.sendMessage(chatId, `✅ **Announcement Channel Set!**\n\nChannel: \`${formatted}\`\n\n⚠️ **Important:** Make sure to add this bot as an **Administrator** in your Telegram channel.`, { parse_mode: 'Markdown' });
+      sendAdminDashboard(chatId);
+      return;
+    }
+
+    // Set Tutorial Video Command: /settutorial link or /settutorial off
+    if (text.startsWith('/settutorial') && chatId.toString() === adminChatId) {
+      const linkParam = text.replace('/settutorial', '').trim();
+      if (!linkParam) {
+        bot.sendMessage(chatId, "❌ Usage: `/settutorial https://t.me/MyChannel/123` or `/settutorial off`", { parse_mode: 'Markdown' });
+        return;
+      }
+      if (linkParam.toLowerCase() === 'off' || linkParam.toLowerCase() === 'disable') {
+        db.settings.tutorialVideoLink = '';
+        saveDB();
+        bot.sendMessage(chatId, "✅ Tutorial video forwarding disabled.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+      if (!linkParam.startsWith('https://t.me/')) {
+        bot.sendMessage(chatId, "❌ Invalid link format. Must start with `https://t.me/`.", { parse_mode: 'Markdown' });
+        return;
+      }
+      db.settings.tutorialVideoLink = linkParam;
+      saveDB();
+      bot.sendMessage(chatId, `✅ **Tutorial Video Set!**\n\nLink: \`${linkParam}\`\n\n⚠️ **Important:** Make sure the bot is an admin in the channel where this message is from!`, { parse_mode: 'Markdown' });
+      sendAdminDashboard(chatId);
+      return;
+    }
+
+    // Set Announcement Group Command: /setgroup @Group or /setgroup off
+    if ((text.startsWith('/setgroup') || text.startsWith('/setanngroup') || text.startsWith('/setannouncementgroup')) && chatId.toString() === adminChatId) {
+      const groupParam = text.replace(/\/setgroup|\/setanngroup|\/setannouncementgroup/, '').trim();
+      if (!groupParam) {
+        bot.sendMessage(chatId, "❌ Usage: `/setgroup @YourGroupUsername` or `/setgroup -100123456789` or `/setgroup off`", { parse_mode: 'Markdown' });
+        return;
+      }
+      if (groupParam.toLowerCase() === 'off' || groupParam.toLowerCase() === 'disable') {
+        db.settings.announcementGroup = '';
+        saveDB();
+        bot.sendMessage(chatId, "✅ Announcement group notifications disabled.");
+        sendAdminDashboard(chatId);
+        return;
+      }
+      let formatted = groupParam;
+      if (!formatted.startsWith('@') && !formatted.startsWith('-100') && !formatted.startsWith('https://t.me/')) {
+        formatted = `@${formatted}`;
+      }
+      db.settings.announcementGroup = formatted;
+      saveDB();
+      bot.sendMessage(chatId, `✅ **Announcement Group Set!**\n\nGroup: \`${formatted}\`\n\n⚠️ **Important:** Make sure this bot is added to your group with message sending permissions. Purchases and AM activations will now be posted here automatically!`, { parse_mode: 'Markdown' });
       sendAdminDashboard(chatId);
       return;
     }
@@ -1404,6 +1777,15 @@ export function startBot() {
         ? "အဆင်မပြေမှုများရှိပါက Admin သို့ တိုက်ရိုက်ဆက်သွယ်နိုင်ပါသည်။\n\n💬 Admin: @levil_ft_sushitrash"
         : "If you need any help, you can contact the Admin directly.\n\n💬 Admin: @levil_ft_sushitrash";
       bot.sendMessage(chatId, contactMsg);
+      return;
+    }
+
+    if (text === '🔑 Redeem Code' || text === '🔑 လက်ဆောင် Code ရယူရန်') {
+      userStates[chatId] = { step: 'AWAITING_REDEEM_CODE' };
+      const msg = user.language === 'my'
+        ? `🎁 **Redeem Code**\n\nကျေးဇူးပြု၍ သင်ရရှိထားသော လက်ဆောင် Code ကို ရိုက်ထည့်ပါ။`
+        : `🎁 **Redeem Code**\n\nPlease enter your giveaway redeem code.`;
+      bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
       return;
     }
 
@@ -1678,6 +2060,81 @@ export function startBot() {
     }
 
     // 2. Awaiting AM Email
+    
+    if (state.step === 'AWAITING_REDEEM_CODE' && text) {
+      const code = text.trim();
+      const giveaway = db.giveaways[code];
+      
+      if (!giveaway) {
+        const errorMsg = user.language === 'my'
+          ? "❌ အဆိုပါ Code မှာ မှားယွင်းနေပါသည် သို့မဟုတ် မရှိပါ။"
+          : "❌ Invalid or non-existent code.";
+        bot.sendMessage(chatId, errorMsg);
+        delete userStates[chatId];
+        return;
+      }
+      
+      if (giveaway.redeemedBy.includes(user.id)) {
+        const errorMsg = user.language === 'my'
+          ? "❌ သင်သည် ဤ Code ကို အသုံးပြုပြီးပါပြီ။"
+          : "❌ You have already redeemed this code.";
+        bot.sendMessage(chatId, errorMsg);
+        delete userStates[chatId];
+        return;
+      }
+      
+      if (giveaway.redeemedBy.length >= giveaway.maxUses) {
+        const errorMsg = user.language === 'my'
+          ? "❌ ဤ Code မှာ အသုံးပြုနိုင်သော အရေအတွက် ပြည့်သွားပါပြီ။"
+          : "❌ This code has reached its maximum usage limit.";
+        bot.sendMessage(chatId, errorMsg);
+        delete userStates[chatId];
+        return;
+      }
+      
+      // Redeem successful
+      giveaway.redeemedBy.push(user.id);
+      
+      if (giveaway.type === 'discount' && giveaway.discountPercent) {
+        if (!user.discountTokens) user.discountTokens = [];
+        user.discountTokens.push({ code, percent: giveaway.discountPercent, isUsed: false });
+        
+        saveDB();
+        const successMsg = user.language === 'my'
+          ? `🎉 **ဂုဏ်ယူပါတယ်!**\n\n${giveaway.discountPercent}% Discount Token ကို ရရှိပါပြီ။ Checkout ပြုလုပ်စဉ်တွင် အသုံးပြုနိုင်ပါသည်။`
+          : `🎉 **Congratulations!**\n\nYou've received a ${giveaway.discountPercent}% Discount Token. You can use it during checkout.`;
+        bot.sendMessage(chatId, successMsg, { parse_mode: 'Markdown' });
+      } else {
+        user.activatableCount += giveaway.reward;
+        
+        db.ledger.push({
+          id: Date.now().toString(),
+          type: 'bonus',
+          amount: 0,
+          description: `Redeemed giveaway code: ${code} (+${giveaway.reward} Acts)`,
+          date: new Date().toISOString()
+        });
+        
+        saveDB();
+        
+        const successMsg = user.language === 'my'
+          ? `🎉 **ဂုဏ်ယူပါတယ်!**\n\n🎁 သင်သည် ဤ Code အား အောင်မြင်စွာ အသုံးပြုပြီးပါပြီ။\n⚡ အသက်သွင်းခွင့် ${giveaway.reward} ခု ရရှိပါသည်။`
+          : `🎉 **Congratulations!**\n\n🎁 You have successfully redeemed this code.\n⚡ You received ${giveaway.reward} activations.`;
+        
+        bot.sendMessage(chatId, successMsg, { parse_mode: 'Markdown' });
+      }
+      
+      // Announce in notification group
+      const notifyGroup = process.env.TELEGRAM_NOTIFICATION_GROUP;
+      if (notifyGroup) {
+        const announceMsg = `🎉 **Giveaway Redeemed!**\n👤 User: ${user.name} (` + user.id + `)\n🔑 Code: ${code}\n🎁 Reward: ${giveaway.reward} Activations\n📈 Progress: ${giveaway.redeemedBy.length}/${giveaway.maxUses}`;
+        bot.sendMessage(notifyGroup, announceMsg, { parse_mode: 'Markdown' }).catch(() => {});
+      }
+      
+      delete userStates[chatId];
+      return;
+    }
+
     if (state.step === 'AWAITING_AM_EMAIL' && text) {
       if (!text.includes('@')) {
         const invalidEmailMsg = user.language === 'my'
@@ -1767,6 +2224,45 @@ export function startBot() {
             : `✅ **Success!** Account \`${email}\` is now activated. You have **${user.activatableCount}** activations left.`;
 
           bot.sendMessage(chatId, successMsg, { parse_mode: 'Markdown' });
+
+          // Send notification to announcement group
+          const userName = user.name || 'Valued User';
+          const userIdMasked = user.id.length > 4 ? `${user.id.slice(0, 4)}***` : user.id;
+          let maskedEmail = email || '';
+          if (maskedEmail.includes('@')) {
+            const [local, domain] = maskedEmail.split('@');
+            const visibleLen = Math.min(3, Math.max(1, Math.floor(local.length / 2)));
+            maskedEmail = `${local.slice(0, visibleLen)}***@${domain}`;
+          }
+
+          const actAnnounceMsg = `🚀 **Alight Motion Account Activated! / AM အကောင့် အောင်မြင်စွာ အသက်သွင်းပြီးပါပြီ!**\n\n` +
+            `👤 **User:** ${userName} (\`${userIdMasked}\`)\n` +
+            `📧 **Account Email:** \`${maskedEmail}\`\n` +
+            `⚡ **Status:** Successfully Activated 🟢\n\n` +
+            `🙏 **Thank you for using our Auto-Activation service! Enjoy your Alight Motion Premium! / ကျွန်ုပ်တို့၏ Auto-Activation ဝန်ဆောင်မှုကို အသုံးပြုပေးသည့်အတွက် အထူးပင် ကျေးဇူးတင်ရှိပါသည်ခင်ဗျာ!** ✨`;
+          sendGroupAnnouncement(actAnnounceMsg);
+
+          if (db.settings.tutorialVideoLink) {
+            const publicMatch = db.settings.tutorialVideoLink.match(/t\.me\/([a-zA-Z0-9_]+)\/(\d+)/);
+            const privateMatch = db.settings.tutorialVideoLink.match(/t\.me\/c\/(\d+)\/(\d+)/);
+
+            if (privateMatch) {
+              const fromChatId = '-100' + privateMatch[1];
+              const msgId = parseInt(privateMatch[2], 10);
+              bot.forwardMessage(chatId, fromChatId, msgId).catch((err: any) => {
+                bot.sendMessage(chatId, `🎥 **Tutorial Video:**\n${db.settings.tutorialVideoLink}`);
+              });
+            } else if (publicMatch && publicMatch[1].toLowerCase() !== 'c') {
+              const fromChatId = '@' + publicMatch[1];
+              const msgId = parseInt(publicMatch[2], 10);
+              bot.forwardMessage(chatId, fromChatId, msgId).catch((err: any) => {
+                bot.sendMessage(chatId, `🎥 **Tutorial Video:**\n${db.settings.tutorialVideoLink}`);
+              });
+            } else {
+              bot.sendMessage(chatId, `🎥 **Tutorial Video:**\n${db.settings.tutorialVideoLink}`);
+            }
+          }
+
           userStates[chatId] = { step: 'IDLE' };
           sendMainMenu(chatId, user.language);
         } else {
@@ -1847,7 +2343,7 @@ export function startBot() {
     const msgId = query.message?.message_id;
     if (!chatId || !msgId) return;
 
-    const data = query.data || '';
+    let data = query.data || '';
     const user = getUser(chatId, query.from.first_name);
 
     // Check Maintenance Mode for regular users
@@ -1939,6 +2435,43 @@ export function startBot() {
       return;
     }
 
+    if (data === 'admin_prompt_set_announcement_channel' && chatId.toString() === adminChatId) {
+      userStates[chatId] = { step: 'AWAITING_ANNOUNCEMENT_CHANNEL_INPUT' };
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId, `📢 **Set Announcement Telegram Channel**\n\nPlease reply with the **Channel Username** (e.g. \`@MyAnnouncements\`) or **Channel ID** (e.g. \`-100123456789\`).\n\nTo disable, type \`off\` or \`/cancel\`.\n\n⚠️ *Make sure this bot is added as an Administrator in that channel!*`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (data === 'admin_prompt_set_announcement_group' && chatId.toString() === adminChatId) {
+      userStates[chatId] = { step: 'AWAITING_ANNOUNCEMENT_GROUP_INPUT' };
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId, `👥 **Set Announcement Telegram Group**\n\nPlease reply with the **Group Username** (e.g. \`@MyGroup\`) or **Group Chat ID** (e.g. \`-100123456789\`).\n\nTo disable, type \`off\` or \`/cancel\`.\n\n⚠️ *Make sure this bot is added to your group with message sending permissions!*`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (data === 'admin_prompt_set_tutorial_video' && chatId.toString() === adminChatId) {
+      userStates[chatId] = { step: 'AWAITING_TUTORIAL_VIDEO_LINK' };
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId, `🎥 **Set Tutorial Video Link**\n\nPlease reply with the Telegram message link of the video (e.g. \`https://t.me/MyChannel/123\` or \`https://t.me/c/123456789/123\`).\n\nWhen a user successfully activates an AM account, the bot will forward this video to them.\n\nTo disable, type \`off\` or \`/cancel\`.\n\n⚠️ *Make sure the bot is an admin in the channel where the video is located!*`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (data === 'admin_remove_tutorial_video' && chatId.toString() === adminChatId) {
+      db.settings.tutorialVideoLink = '';
+      saveDB();
+      bot.answerCallbackQuery(query.id, { text: "Tutorial video removed." });
+      sendAdminDashboard(chatId, msgId);
+      return;
+    }
+
+    if (data === 'admin_remove_announcement_group' && chatId.toString() === adminChatId) {
+      db.settings.announcementGroup = '';
+      saveDB();
+      bot.answerCallbackQuery(query.id, { text: "Announcement group removed." });
+      sendAdminDashboard(chatId, msgId);
+      return;
+    }
+
     if (data === 'admin_prompt_set_channel' && chatId.toString() === adminChatId) {
       userStates[chatId] = { step: 'AWAITING_CHANNEL_INPUT' };
       bot.answerCallbackQuery(query.id);
@@ -1950,6 +2483,14 @@ export function startBot() {
       userStates[chatId] = { step: 'AWAITING_BACKUP_CHANNEL_INPUT' };
       bot.answerCallbackQuery(query.id);
       bot.sendMessage(chatId, `📦 **Set Database Backup Telegram Channel**\n\nPlease reply with the **Channel Username** (e.g. \`@AutoMotionBackups\`) or **Channel ID** (e.g. \`-100123456789\`).\n\nTo disable, type \`off\` or \`/cancel\`.\n\n⚠️ *Make sure this bot is added as an Administrator in that channel with message/document posting permissions!*`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (data === 'admin_remove_announcement_channel' && chatId.toString() === adminChatId) {
+      db.settings.announcementChannel = '';
+      saveDB();
+      bot.answerCallbackQuery(query.id, { text: "Announcement channel removed." });
+      sendAdminDashboard(chatId, msgId);
       return;
     }
 
@@ -1983,6 +2524,45 @@ export function startBot() {
     }
 
     // --- Database Import Callbacks ---
+    
+    if (data === 'admin_giveaway_menu' && chatId.toString() === adminChatId) {
+      bot.answerCallbackQuery(query.id);
+      bot.sendMessage(chatId, `🎁 **Giveaway Menu**\n\nChoose an option below:`, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🎟 Create Redeem Key', callback_data: 'admin_giveaway_key' }],
+            [{ text: '🎲 Random Users Drop', callback_data: 'admin_giveaway_random' }],
+            [{ text: '🎫 Create Discount Key', callback_data: 'admin_giveaway_discount' }],
+            [{ text: '🔙 Back to Dashboard', callback_data: 'admin_refresh_dashboard' }]
+          ]
+        }
+      });
+      return;
+    }
+
+    if (data === 'admin_giveaway_key' && chatId.toString() === adminChatId) {
+      bot.answerCallbackQuery(query.id);
+      userStates[chatId] = { step: 'AWAITING_GIVEAWAY_CODE_SETUP', data: { type: 'key' } };
+      bot.sendMessage(chatId, `🎟 **Step 1: Custom Code**\n\nEnter a custom code for the giveaway (e.g. \`SUMMER2027\`), or type \`random\` to auto-generate one.`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (data === 'admin_giveaway_random' && chatId.toString() === adminChatId) {
+      bot.answerCallbackQuery(query.id);
+      userStates[chatId] = { step: 'AWAITING_GIVEAWAY_CODE_SETUP', data: { type: 'random' } };
+      bot.sendMessage(chatId, `🎲 **Step 1: Custom Code**\n\nEnter a custom code for the random drop giveaway, or type \`random\` to auto-generate one.`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    
+    if (data === 'admin_giveaway_discount' && chatId.toString() === adminChatId) {
+      bot.answerCallbackQuery(query.id);
+      userStates[chatId] = { step: 'AWAITING_GIVEAWAY_CODE_SETUP', data: { type: 'discount' } };
+      bot.sendMessage(chatId, `🎫 **Step 1: Custom Code**\n\nEnter a custom code for the discount key, or type \`random\` to auto-generate one.`, { parse_mode: 'Markdown' });
+      return;
+    }
+
     if (data === 'admin_import_db_menu' && chatId.toString() === adminChatId) {
       bot.answerCallbackQuery(query.id);
       sendImportDatabaseMenu(chatId, msgId);
@@ -2099,8 +2679,8 @@ export function startBot() {
 
     // Check Join Channel Verification Callback
     if (data.startsWith('check_join')) {
-      const isJoined = await checkUserJoinedChannel(chatId);
-      if (isJoined) {
+      const unjoined = await getUnjoinedChannels(chatId);
+      if (unjoined.length === 0) {
         bot.answerCallbackQuery(query.id, { 
           text: user.language === 'my' ? "✅ Join ထားခြင်းကို အတည်ပြုပြီးပါပြီ!" : "✅ Channel membership verified!", 
           show_alert: false 
@@ -2136,9 +2716,9 @@ export function startBot() {
       userStates[chatId] = { step: 'IDLE' };
 
       // Real Telegram API check for channel membership
-      const hasJoined = await checkUserJoinedChannel(chatId);
-      if (!hasJoined) {
-        sendJoinChannelPrompt(chatId, user.language, refParam);
+      const unjoined = await getUnjoinedChannels(chatId);
+      if (unjoined.length > 0) {
+        sendJoinChannelPrompt(chatId, unjoined, user.language, refParam);
         return;
       }
 
@@ -2205,17 +2785,21 @@ export function startBot() {
     // Reseller Subscription Purchase Flow
     if (data === 'buy_reseller_sub') {
       const subPrice = db.settings?.resellerSubPrice || 10000;
+      const pendingDiscount = userStates[chatId]?.data?.pendingDiscount || 0;
+      const pendingTokenCode = userStates[chatId]?.data?.pendingTokenCode || '';
+      const finalPrice = subPrice - Math.round((subPrice * pendingDiscount) / 100);
+      const discountText = pendingDiscount > 0 ? ` (\n🎟 ${pendingDiscount}% Discount Applied)` : '';
       const paymentMsg = user.language === 'my'
         ? `💼 **Reseller Subscription ဝယ်ယူရန် (၁ လ သက်တမ်း)**\n\n` +
           `💳 **ငွေလွှဲရန် အကောင့်များ:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n` +
-          `💰 ကျသင့်ငွေ: **${subPrice.toLocaleString()} Ks** (ရက်ပေါင်း ၃၀)\n\n` +
+          `💰 ကျသင့်ငွေ: **${finalPrice.toLocaleString()} Ks** (ရက်ပေါင်း ၃၀)${discountText}\n\n` +
           `ငွေလွှဲပြီးပါက **ငွေလွှဲပြေစာ (Screenshot/Photo)** ကို ပေးပို့ပေးပါခင်ဗျာ။ (ပြေစာနှင့်အတူ သို့မဟုတ် သီးခြား message ဖြင့် Transaction ID နောက်ဆုံးနံပါတ် ၅ လုံးကိုလည်း ပေးပို့နိုင်ပါသည်)`
         : `💼 **Purchase Reseller Subscription (1 Month / 30 Days)**\n\n` +
           `💳 **Payment Accounts:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n` +
-          `💰 Total Amount: **${subPrice.toLocaleString()} Ks**\n\n` +
+          `💰 Total Amount: **${finalPrice.toLocaleString()} Ks**${discountText}\n\n` +
           `Please send a screenshot (photo) of your transfer slip. You can include the 5 digits as a caption, or send it as a separate message.`;
 
-      userStates[chatId] = { step: 'AWAITING_PAYMENT_SLIP', data: { amount: 0, finalPrice: subPrice, type: 'reseller_sub', months: 1 } };
+      userStates[chatId] = { step: 'AWAITING_PAYMENT_SLIP', data: { amount: 0, finalPrice, type: 'reseller_sub', months: 1, discountCode: pendingTokenCode } };
       bot.editMessageText(paymentMsg, {
         chat_id: chatId,
         message_id: msgId,
@@ -2238,21 +2822,25 @@ export function startBot() {
       }
 
       const amount = parseInt(data.replace('buy_reseller_act_', ''));
-      const finalPrice = getResellerPrice(amount);
+      const basePrice = getResellerPrice(amount);
+      const pendingDiscount = userStates[chatId]?.data?.pendingDiscount || 0;
+      const pendingTokenCode = userStates[chatId]?.data?.pendingTokenCode || '';
+      const finalPrice = basePrice - Math.round((basePrice * pendingDiscount) / 100);
+      const discountText = pendingDiscount > 0 ? ` (\n🎟 ${pendingDiscount}% Discount Applied)` : '';
 
       const paymentMsg = user.language === 'my'
         ? `💼 **Reseller အထူးလက်ကား Activation ဝယ်ယူရန်**\n\n` +
           `💳 **ငွေလွှဲရန် အကောင့်များ:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n` +
           `⚡ အရေအတွက်: **${amount} Activations**\n` +
-          `💰 လက်ကားကျသင့်ငွေ: **${finalPrice.toLocaleString()} Ks**\n\n` +
+          `💰 လက်ကားကျသင့်ငွေ: **${finalPrice.toLocaleString()} Ks**${discountText}\n\n` +
           `ငွေလွှဲပြီးပါက **ငွေလွှဲပြေစာ (Screenshot/Photo)** ကို ပေးပို့ပေးပါခင်ဗျာ။ (ပြေစာနှင့်အတူ သို့မဟုတ် သီးခြား message ဖြင့် Transaction ID နောက်ဆုံးနံပါတ် ၅ လုံးကိုလည်း ပေးပို့နိုင်ပါသည်)`
         : `💼 **Reseller Wholesale Activation Purchase**\n\n` +
           `💳 **Payment Accounts:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n` +
           `⚡ Activations: **${amount}**\n` +
-          `💰 Wholesale Price: **${finalPrice.toLocaleString()} Ks**\n\n` +
+          `💰 Wholesale Price: **${finalPrice.toLocaleString()} Ks**${discountText}\n\n` +
           `Please send a screenshot (photo) of your transfer slip. You can include the 5 digits as a caption, or send it as a separate message.`;
 
-      userStates[chatId] = { step: 'AWAITING_PAYMENT_SLIP', data: { amount, finalPrice, type: 'reseller_activations' } };
+      userStates[chatId] = { step: 'AWAITING_PAYMENT_SLIP', data: { amount, finalPrice, type: 'reseller_activations', discountCode: pendingTokenCode } };
       bot.editMessageText(paymentMsg, {
         chat_id: chatId,
         message_id: msgId,
@@ -2266,21 +2854,25 @@ export function startBot() {
     // Process slip amount selection for Normal Users
     if (data?.startsWith('buy_')) {
       const state = userStates[chatId];
-      if (state?.step !== 'AWAITING_AMOUNT_SELECTION') {
+      if (state?.step !== 'AWAITING_AMOUNT_SELECTION' && state?.step !== 'AWAITING_DISCOUNT_APPLIED') {
         bot.answerCallbackQuery(query.id, { 
           text: user.language === 'my' ? "အချိန်ကုန်ဆုံးသွားပါပြီ။ အစမှ ပြန်စပေးပါ။" : "Session expired. Please start over." 
         });
         return;
       }
       const amount = parseInt(data.split('_')[1]);
-      const basePrice = getNormalPrice(amount);
-      const finalPrice = user.invitedBy ? Math.round(basePrice * 0.9) : basePrice;
+      const normalBasePrice = getNormalPrice(amount);
+      let basePrice = user.invitedBy ? Math.round(normalBasePrice * 0.9) : normalBasePrice;
+      const pendingDiscount = userStates[chatId]?.data?.pendingDiscount || 0;
+      const pendingTokenCode = userStates[chatId]?.data?.pendingTokenCode || '';
+      const finalPrice = basePrice - Math.round((basePrice * pendingDiscount) / 100);
+      const discountText = pendingDiscount > 0 ? ` (🎟 ${pendingDiscount}% Discount Applied)` : '';
       
       const paymentMsg = user.language === 'my'
-        ? `💳 **ငွေလွှဲရန် အကောင့်များ:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n⚡ ဝယ်ယူမည့် အရေအတွက်: **${amount} Activations**\n💰 စုစုပေါင်း ကျသင့်ငွေ: **${finalPrice.toLocaleString()} Ks** ${user.invitedBy ? '_(10% Referral လျှော့စျေး ထည့်သွင်းပြီး)_' : ''}\n\nငွေလွှဲပြီးပါက **ငွေလွှဲပြေစာ (Screenshot/Photo)** ကို ပေးပို့ပေးပါခင်ဗျာ။ (ပြေစာနှင့်အတူ သို့မဟုတ် သီးခြား message ဖြင့် Transaction ID နောက်ဆုံးနံပါတ် ၅ လုံးကိုလည်း ပေးပို့နိုင်ပါသည်)`
-        : `💳 **Payment Accounts:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n⚡ Activations: **${amount}**\n💰 Total Amount: **${finalPrice.toLocaleString()} Ks** ${user.invitedBy ? '_(Included 10% discount)_' : ''}\n\nPlease send a screenshot (photo) of your transfer slip. You can include the 5 digits as a caption, or send it as a separate message.`;
+        ? `💳 **ငွေလွှဲရန် အကောင့်များ:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n⚡ ဝယ်ယူမည့် အရေအတွက်: **${amount} Activations**\n💰 စုစုပေါင်း ကျသင့်ငွေ: **${finalPrice.toLocaleString()} Ks** ${user.invitedBy ? '_(10% Ref Discount)_' : ''}${discountText}\n\nငွေလွှဲပြီးပါက **ငွေလွှဲပြေစာ (Screenshot/Photo)** ကို ပေးပို့ပေးပါခင်ဗျာ။ (ပြေစာနှင့်အတူ သို့မဟုတ် သီးခြား message ဖြင့် Transaction ID နောက်ဆုံးနံပါတ် ၅ လုံးကိုလည်း ပေးပို့နိုင်ပါသည်)`
+        : `💳 **Payment Accounts:**\n\n📱 **09447173023**\n🌊 **Wave** - Daw Kyaing\n🟡 **Kpay** - Min Naing\n\n⚡ Activations: **${amount}**\n💰 Total Amount: **${finalPrice.toLocaleString()} Ks** ${user.invitedBy ? '_(10% Ref Discount)_' : ''}${discountText}\n\nPlease send a screenshot (photo) of your transfer slip. You can include the 5 digits as a caption, or send it as a separate message.`;
       
-      userStates[chatId] = { step: 'AWAITING_PAYMENT_SLIP', data: { amount, finalPrice, type: 'activations' } };
+      userStates[chatId] = { step: 'AWAITING_PAYMENT_SLIP', data: { amount, finalPrice, type: 'activations', discountCode: pendingTokenCode } };
       
       bot.editMessageText(paymentMsg, {
         chat_id: chatId,
@@ -2335,6 +2927,17 @@ export function startBot() {
             : `🎉 **Your Reseller Subscription was approved!**\n\nExpires: \`${expiryStr}\` (30 Days)\nYou can now purchase activations at wholesale rates from the Reseller Panel!`;
 
           bot.sendMessage(targetUserId, subApprovedMsg, { parse_mode: 'Markdown' });
+
+          // Send notification to announcement group
+          const buyerName = targetUser.name || 'Valued Customer';
+          const buyerIdMasked = targetUser.id.length > 4 ? `${targetUser.id.slice(0, 4)}***` : targetUser.id;
+          const subAnnounceMsg = `🛒 **New Purchase Approved! / ဝယ်ယူမှုအသစ် အတည်ပြုပြီးပါပြီ!**\n\n` +
+            `👤 **Customer:** ${buyerName} (\`${buyerIdMasked}\`)\n` +
+            `💼 **Package:** Reseller Subscription (1 Month / 30 Days)\n` +
+            `💰 **Amount:** ${targetOrder.amount.toLocaleString()} Ks\n\n` +
+            `🙏 **Thank you so much for your purchase and trusting our service! / ကျွန်ုပ်တို့၏ ဝန်ဆောင်မှုကို အသုံးပြုပြီး အားပေးမှုအတွက် အထူးပင် ကျေးဇူးတင်ရှိပါသည်ခင်ဗျာ!** ✨`;
+          sendGroupAnnouncement(subAnnounceMsg);
+
           return;
         }
 
@@ -2375,8 +2978,25 @@ export function startBot() {
           : `🎉 Your order **${orderId}** was approved!\n${targetOrder.activations} activations have been added to your account.`;
 
         bot.sendMessage(targetUserId, userApprovedMsg, { parse_mode: 'Markdown' });
+
+        // Send notification to announcement group
+        const buyerName = targetUser.name || 'Valued Customer';
+        const buyerIdMasked = targetUser.id.length > 4 ? `${targetUser.id.slice(0, 4)}***` : targetUser.id;
+        const packageType = targetOrder.type === 'reseller_activations' 
+          ? `⚡ ${targetOrder.activations} Bulk Activations (Reseller)`
+          : `⚡ ${targetOrder.activations} Activation${targetOrder.activations > 1 ? 's' : ''}`;
+        const buyAnnounceMsg = `🛒 **New Purchase Approved! / ဝယ်ယူမှုအသစ် အတည်ပြုပြီးပါပြီ!**\n\n` +
+          `👤 **Customer:** ${buyerName} (\`${buyerIdMasked}\`)\n` +
+          `📦 **Package:** ${packageType}\n` +
+          `💰 **Amount:** ${targetOrder.amount.toLocaleString()} Ks\n\n` +
+          `🙏 **Thank you so much for your purchase and trusting our service! / ကျွန်ုပ်တို့၏ ဝန်ဆောင်မှုကို အသုံးပြုပြီး အားပေးမှုအတွက် အထူးပင် ကျေးဇူးတင်ရှိပါသည်ခင်ဗျာ!** ✨`;
+        sendGroupAnnouncement(buyAnnounceMsg);
       } else {
         targetOrder.status = 'rejected';
+        if (targetOrder.discountCode && targetUser.discountTokens) {
+          const t = targetUser.discountTokens.find(dt => dt.code === targetOrder.discountCode);
+          if (t) t.isUsed = false;
+        }
         saveDB();
 
         bot.editMessageCaption(`❌ **Rejected** Order ${orderId}\nUser: ${targetUser.name}`, {
